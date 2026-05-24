@@ -3,6 +3,7 @@
 > 日期: 2026-05-24
 > 状态: DEMO V1 完成，核心功能可用
 >
+> **仓库**: https://github.com/BENIMALS9/IMBot
 > **硬件环境**: RTX 4070 SUPER (12GB VRAM)，Windows Docker Desktop (WSL2)
 > **图片规模**: 千级~万级（个人使用）
 
@@ -288,10 +289,12 @@ qwen_model: str = "qwen-vl-max"
 
 ```
 image_db/
-├── docker-compose.yml              # 6 容器编排
-├── .env.example                    # 环境变量模板
-├── DESIGN_V1.md                    # 原始设计文档
-├── DEMO_V1.md                      # 本文档
+├── .gitignore                       # 排除 .claude/、模型文件、人脸缩略图等
+├── README.md                        # 项目说明
+├── docker-compose.yml               # 6 容器编排
+├── .env.example                     # 环境变量模板
+├── docs/                            # 迭代记录文档
+│   └── DEMO_V1.md                   # 本文档
 │
 ├── backend/
 │   ├── Dockerfile
@@ -470,3 +473,30 @@ GET  /api/stats/devices         — 设备统计（相机型号、镜头）
 - 新人脸与数据库中所有已知人物逐一计算余弦相似度
 - 阈值 0.55：高于阈值 → 匹配已知人物；低于阈值 → 自动创建新 Person
 - 这与用户描述的 "CLIP 原理" 在思路上一致，只是用的是 ArcFace 嵌入而非 CLIP 嵌入（ArcFace 专为人脸优化，比 CLIP 在人脸识别任务上精度更高）
+
+---
+
+## 10. 工程基础设施（2026-05-24 更新）
+
+### 10.1 版本控制
+- **Git 仓库**: `git init` → commit → push
+- **GitHub**: https://github.com/BENIMALS9/IMBot
+- **GitHub 介绍**: work-in-progress vibe coding 练手图像管理系统
+
+### 10.2 .gitignore 排除策略
+确保敏感/大型/生成文件不上传：
+
+| 类别 | 排除内容 |
+|------|---------|
+| **Claude** | `CLAUDE.md`、`.claude/`（技能框架、settings） |
+| **设计文档** | `DESIGN_V1.md`（仅保留 `docs/` 内的迭代记录） |
+| **运行时数据** | `data/images/`、`data/thumbnails/`、`data/face_thumbnails/` |
+| **模型文件** | `data/insightface_models/`（~500MB ONNX 模型） |
+| **环境配置** | `.env`、`.env.local` |
+| **IDE/OS** | `.idea/`、`.vscode/`、`.DS_Store`、`Thumbs.db` |
+| **依赖产物** | `node_modules/`、`dist/`、`__pycache__/`、`*.egg-info/` |
+| **数据库** | `pgdata/`、`redis_data/`、`ollama_data/` |
+
+### 10.3 文档目录 `docs/`
+- `docs/DEMO_V1.md` — 当前迭代记录
+- 后续每个 DEMO 版本在此目录下新建 `DEMO_V2.md`、`DEMO_V3.md`...（遵循工业标准：文档集中管理、版本化迭代记录）
