@@ -115,12 +115,13 @@
 
 ### 2.3 AI 处理流水线
 - [x] **VLM 描述生成**: Qwen3-VL 8B 中文图片描述（≤100 字）
-- [x] **关键词分类**: 描述文字匹配预定义分类体系
+- [x] **VLM 描述 + 分类**: Qwen3-VL 8B 单次调用（"分类：" 分隔符合并输出），模型自行选出 1-3 个最佳分类，失败自动重试一次
+- [x] **失败重试**: `/images/{id}/reprocess` 端点，超时/错误状态显示 + 前端重试按钮
 - [x] **人脸检测**: InsightFace SCRFD 检测
 - [x] **人脸识别**: ArcFace 512 维嵌入 + pgvector 余弦相似度匹配（阈值 0.55）
 - [x] **新人自动创建**: 低于阈值的脸自动创建 Person 记录
 - [x] **人脸缩略图**: 自动裁剪保存
-- [x] **处理进度追踪**: ProcessingTask 表记录每步状态 + 时间戳
+- [x] **处理进度追踪**: ProcessingTask 表记录每步状态 + 时间戳（含 timeout/error 状态）
 - [x] **实时状态轮询**: 前端 5 秒间隔刷新上传历史
 
 ### 2.4 人物管理
@@ -148,7 +149,10 @@
 - [x] 按人物筛选
 - [x] 按文件夹筛选
 - [x] 按日期范围筛选
-- [x] 关键词文本搜索
+- [x] 全文搜索（描述/文件名/地点/相机）
+- [x] **搜索建议**: 随机 10 个分类 + 6 个热词（jieba 分词，纯中文，2-4 字）
+- [x] **自动补全**: 200ms 防抖，5 种类型（文件名/人物/相机/分类/热词），彩色标签
+- [x] **范围过滤**: 选择搜索范围后补全仅显示对应类型（SCOPE_TYPE_MAP）
 - [x] URL 参数同步（可分享筛选链接）
 
 ### 2.8 系统管理
@@ -267,7 +271,8 @@ qwen_model: str = "qwen-vl-max"
 | `/` | DashboardPage | 统计概览 |
 | `/gallery` | GalleryPage | 图片瀑布流 + 筛选（URL 参数同步） |
 | `/images/:id` | ImageDetailPage | 图片详情 + EXIF + AI 数据 |
-| `/upload` | UploadPage | 拖拽上传 + 上传历史（AI 状态实时刷新） |
+| `/upload` | UploadPage | 拖拽上传 + 上传历史（AI 状态实时刷新）+ 树形文件夹选择 |
+| `/folders` | FoldersPage | 文件夹管理（树形创建/重命名/删除，递归展示） |
 | `/persons` | PersonsPage | 人物网格（已识别 + 待标注） |
 | `/persons/:id` | PersonDetailPage | 人物详情 + 关联图片 |
 | `/albums` | AlbumsPage | 相册列表 |
@@ -376,6 +381,8 @@ image_db/
 | TODO-2 | 补充各功能模块的单元测试（可在本机 Docker 环境执行） | ✅ 已完成 |
 | TODO-3 | 人物界面拖动头像合并重复人物（同一人识别为多个 Person） | ✅ 已完成 |
 | TODO-4 | 图像数据可视化（类别统计、人物统计、热词、知识图谱等） | 📋 待实现 |
+| TODO-5 | Prometheus + Grafana 系统指标监控（应用/流水线/基础设施） | 📋 待实现 |
+| TODO-6 | 系统可靠性设计（健康检查/心跳/优雅降级/自动恢复/日志审计） | 📋 待实现 |
 
 ---
 
@@ -460,6 +467,108 @@ GET  /api/stats/graph           — 知识图谱（节点 + 边）
 GET  /api/stats/devices         — 设备统计（相机型号、镜头）
 ```
 
+### 8.5 系统监控（Prometheus + Grafana）
+对 6 个容器及 AI 处理流水线进行全栈指标监控。
+
+- **指标采集**: `prometheus_client`（Python）/ 内置 metrics endpoint
+- **时序存储**: Prometheus（scrape `/metrics` 端点，15s 间隔）
+- **可视化**: Grafana Dashboard（导入预配置 JSON）
+- **告警**: Alertmanager 规则（可选，初期手动查看）
+
+#### 8.5.1 应用层指标（FastAPI）
+- **HTTP**: 请求总数、延迟分布（P50/P90/P99）、状态码计数（2xx/4xx/5xx）、活跃请求数
+- **业务**: 图片上传速率、AI 处理速率、处理失败率、搜索查询速率
+
+#### 8.5.2 AI 流水线指标（Celery Worker）
+- **任务**: 任务执行时间（caption/classify/faces 分段）、任务状态计数（pending/running/done/timeout/error）、队列积压深度
+- **VLM**: Ollama API 调用延迟、成功/超时/空响应比例
+- **人脸**: 人脸检测数/图片、ArcFace 匹配耗时
+
+#### 8.5.3 基础设施指标
+- **PostgreSQL**: 连接池使用率、查询延迟、慢查询计数、pgvector 索引命中率
+- **Redis**: 内存使用、连接数、Celery 队列长度
+- **Docker 容器**: CPU、内存、磁盘使用（通过 `docker stats` 或 cAdvisor）
+
+#### 8.5.4 Grafana Dashboard 布局
+```
+┌──────────────────────────────────────────────────────┐
+│  ImageDB Overview                           [刷新]  │
+├──────────┬──────────┬──────────┬─────────────────────┤
+│ 总图片数 │ 今日上传 │ 处理中   │ 失败率             │
+│ 1,234    │ 12       │ 3        │ 2.1%               │
+├──────────┴──────────┴──────────┴─────────────────────┤
+│  HTTP 延迟 (P50/P90/P99)         AI 处理速率         │
+│  ┌──────────────────────┐  ┌──────────────────────┐ │
+│  │ 折线图               │  │ 柱状图               │ │
+│  └──────────────────────┘  └──────────────────────┘ │
+├──────────────────────────────────────────────────────┤
+│  容器资源 (CPU/MEM)                                   │
+│  ┌──────────────────────────────────────────────────┐│
+│  │ 堆叠面积图: api / worker / postgres / redis ...  ││
+│  └──────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────┘
+```
+
+#### 8.5.5 容器编排
+在 `docker-compose.yml` 中新增：
+```yaml
+prometheus:
+  image: prom/prometheus:latest
+  volumes:
+    - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+  ports:
+    - "9090:9090"
+
+grafana:
+  image: grafana/grafana:latest
+  ports:
+    - "3000:3000"
+  volumes:
+    - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+```
+
+### 8.6 系统可靠性设计
+确保服务在异常情况下可自愈或优雅降级。
+
+#### 8.6.1 健康检查与心跳
+- **容器级**: 所有容器添加 Docker `healthcheck`（当前仅 postgres/redis 有）
+  ```yaml
+  api:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  ```
+- **应用级**: `/api/health` 端点返回各依赖状态
+  ```json
+  {
+    "status": "ok",
+    "checks": {
+      "database": "ok",
+      "redis": "ok",
+      "ollama": "ok",
+      "disk_usage": "72%"
+    }
+  }
+  ```
+- **心跳表**: DB 心跳记录（`heartbeat` 表），worker 定时写入，监控进程存活
+
+#### 8.6.2 优雅降级
+- **AI 服务不可用**: VLM/Face 失败不影响图片上传和浏览（processing_status = timeout/error，用户可手动重试）
+- **数据库连接池耗尽**: 设置 `pool_size=20` + `max_overflow=10` + 连接超时 30s
+- **Redis 不可用**: Celery 自动重连指数退避（当前默认已支持）
+
+#### 8.6.3 自动恢复
+- **Docker restart policy**: 所有容器 `restart: unless-stopped`（当前缺失，worker/ollama 崩溃不会自动重启）
+- **Celery 任务重试**: `autoretry_for=(Exception,)` + `max_retries=3` + `retry_backoff=True`
+- **数据库迁移**: 启动时自动 `alembic upgrade head`（在 `lifespan` 中执行）
+
+#### 8.6.4 日志与审计
+- **结构化日志**: JSON 格式日志 → ELK/Loki 采集（可选）
+- **关键操作审计**: 图片删除、人物合并、分类修改记录操作日志
+- **日志轮转**: `RotatingFileHandler` 或 Docker logging driver 限制日志大小
+
 ---
 
 ## 9. 已确认技术方向
@@ -500,3 +609,32 @@ GET  /api/stats/devices         — 设备统计（相机型号、镜头）
 ### 10.3 文档目录 `docs/`
 - `docs/DEMO_V1.md` — 当前迭代记录
 - 后续每个 DEMO 版本在此目录下新建 `DEMO_V2.md`、`DEMO_V3.md`...（遵循工业标准：文档集中管理、版本化迭代记录）
+
+---
+
+## 11. 每日更新修复记录
+
+### 2026-05-23（前一 session）
+
+| 类型 | 描述 | 涉及文件 |
+|------|------|---------|
+| **Bug 修复** | 自动分类从未生效：`cat_map` 变量未定义导致 NameError，且关键词匹配方案根本无效 | `backend/app/tasks/processing.py` |
+| **方案重构** | VLM 分类改为单次调用 + "分类：" 分隔符（JSON 结构化 prompt 导致 Qwen3-VL 返回空串） | `backend/app/tasks/processing.py` |
+| **新功能** | 分类限制 Top 3（最高得分前三个分类标签） | `backend/app/tasks/processing.py` |
+| **新功能** | 处理超时返回 timeout 状态 + 错误原因，前端重试按钮 | `backend/app/tasks/processing.py`、`backend/app/api/images.py`、`frontend/src/pages/ImageDetailPage.tsx` |
+| **新功能** | 搜索建议重构：随机 10 分类 + 6 热词（jieba 分词，纯中文 2-4 字，去停用词） | `backend/app/api/search.py`、`backend/requirements.txt` |
+| **新功能** | 搜索自动补全：200ms 防抖，5 种类型（文件名/人物/相机/分类/热词），彩色标签区分 | `frontend/src/pages/SearchPage.tsx`、`backend/app/api/search.py` |
+| **新功能** | 范围过滤补全：选择范围后自动补全仅显示对应类型（SCOPE_TYPE_MAP） | `frontend/src/pages/SearchPage.tsx` |
+| **新功能** | 文件夹管理页面：树形创建/重命名/删除，递归展示，层级缩进 | `frontend/src/pages/FoldersPage.tsx`、`frontend/src/lib/api.ts`、`frontend/src/App.tsx`、`frontend/src/components/layout/Layout.tsx` |
+| **改进** | 上传页文件夹选择器显示树形层级（不间断空格 + `└` 缩进） | `frontend/src/pages/UploadPage.tsx` |
+| **文档** | 新建 README.md（系统介绍、架构、启动方法、使用指南） | `README.md` |
+| **文档** | DEMO_V1 新增 TODO-4（图像数据可视化）+ 8.4 节 6 个子功能设计 | `docs/DEMO_V1.md` |
+
+### 2026-05-24（今日）
+
+| 类型 | 描述 | 涉及文件 |
+|------|------|---------|
+| **工程** | `.gitignore` 完善：排除 `.claude/`、模型文件(~500MB)、人脸缩略图、`DESIGN_V1.md` | `.gitignore` |
+| **工程** | `git init` → commit → push 至 GitHub | — |
+| **工程** | 文档目录标准化：`docs/` 文件夹集中管理迭代记录 | `docs/DEMO_V1.md` |
+| **文档** | DEMO_V1 补充：每日更新修复记录、搜索/分类/文件夹功能点更新、仓库信息 | `docs/DEMO_V1.md` |
