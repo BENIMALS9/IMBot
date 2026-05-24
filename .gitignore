@@ -33,7 +33,6 @@ ollama_data/
 # Claude
 CLAUDE.md
 .claude/
-DESIGN_V1.md
 
 # OS
 .DS_Store
