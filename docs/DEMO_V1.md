@@ -1,7 +1,7 @@
 # ImageDB DEMO V1 — 架构·功能·拓扑
 
-> 日期: 2026-05-24
-> 状态: DEMO V1 完成，核心功能可用
+> 最后更新: 2026-05-27
+> 状态: DEMO V1 完成，核心功能可用，架构升级至 Plan C
 >
 > **仓库**: https://github.com/BENIMALS9/IMBot
 > **硬件环境**: RTX 4070 SUPER (12GB VRAM)，Windows Docker Desktop (WSL2)
@@ -43,19 +43,21 @@
 │  SQLAlchemy 2.0 async + Pydantic v2 + exifread + Pillow         │
 └──────┬──────────────────────┬────────────────────────────────────┘
        │                      │
-       │ asyncpg              │ Celery task (Redis broker)
+       │ asyncpg              │ HTTP POST /process
        ▼                      ▼
 ┌──────────────┐    ┌──────────────────────────────────────────────┐
-│ PostgreSQL   │    │           Worker (Celery)                    │
-│ + pgvector   │    │       Container: worker (GPU access)        │
-│              │    │                                              │
-│ Container:   │    │  concurrency=1 (VRAM management)             │
-│ postgres     │    │  ┌────────────────────────────────────────┐ │
-│ (port 5432)  │    │  │  process_new_image(image_id)           │ │
-└──────┬───────┘    │  │  ├─ Step 1: VLM Caption + Classify     │ │
+│ PostgreSQL   │    │     Processing Service (Plan C)              │
+│ + pgvector   │    │     Container: processing (port 8002)       │
+│              │    │     GPU access                               │
+│ Container:   │    │                                              │
+│ postgres     │    │  ThreadPoolExecutor (max_workers=1)          │
+│ (port 5432)  │    │  ┌────────────────────────────────────────┐ │
+└──────┬───────┘    │  │  process_image_sync(image_id)          │ │
+       │            │  │  ├─ Step 1: VLM Caption + Classify     │ │
        │            │  │  │   Qwen3-VL 8B via Ollama            │ │
-       │            │  │  └─ Step 2: Face Detection + Recogn.   │ │
-       │            │  │       InsightFace (SCRFD + ArcFace)     │ │
+       │            │  │  ├─ Step 2: Face Detection + Recogn.   │ │
+       │            │  │  │   InsightFace (SCRFD + ArcFace)     │ │
+       │            │  │  └─ status: pending→processing→done    │ │
        │            │  └────────────────────────────────────────┘ │
        │            │                                              │
        │            │  ┌────────────────────────────────────────┐ │
@@ -72,10 +74,9 @@
 │  redis       │
 │  (port 6379) │
 │              │
-│  Celery      │
-│  broker +    │
-│  result      │
-│  backend     │
+│  (Celery     │
+│   legacy     │
+│   profile)   │
 └──────────────┘
 ```
 
@@ -84,11 +85,14 @@
 | 容器 | 镜像 | 端口 | GPU | 用途 |
 |------|------|------|-----|------|
 | **postgres** | pgvector/pgvector:pg16 | 5432 | — | 主数据库 + 向量存储 |
-| **redis** | redis:7-alpine | 6379 | — | Celery broker + result backend |
+| **redis** | redis:7-alpine | 6379 | — | 缓存（Celery legacy broker） |
 | **api** | built (backend) | 8000 | — | FastAPI REST API |
-| **worker** | built (backend) | — | NVIDIA | Celery worker (AI pipeline) |
+| **processing** | built (backend) | 8002 | NVIDIA | Processing Service — AI 流水线 (Plan C) |
+| **worker** | built (backend) | 8001 | NVIDIA | Celery worker (legacy profile, 已废弃) |
 | **frontend** | built (frontend) | 5173 | — | Vite dev server |
 | **ollama** | ollama/ollama:latest | 11434 | NVIDIA | Qwen3-VL 8B VLM 推理 |
+| **prometheus** | prom/prometheus:latest | 9090 | — | 时序指标采集 (新增) |
+| **grafana** | grafana/grafana:latest | 3000 | — | 监控可视化 (新增) |
 
 ---
 
@@ -206,30 +210,33 @@ POST /api/images/upload
   ├─ 1. 保存原图 + 生成缩略图（EXIF 方向校正）
   ├─ 2. 提取 EXIF 元数据
   ├─ 3. 写入 Image 记录（processing_status = "pending"）
-  └─ 4. 调用 process_new_image.delay(image_id)
+  └─ 4. POST http://processing:8002/process → Processing Service (Plan C)
          │
          ▼
-    Celery Worker (concurrency=1)
+    Processing Service (ThreadPoolExecutor, max_workers=1)
          │
-         ├─ Step 1: _async_caption_and_classify
-         │    ├─ 更新 processing_status → "captioning"
-         │    ├─ 创建 ProcessingTask (task_type="caption_and_classify", status="running")
-         │    ├─ 调用 Ollama API: Qwen3-VL 8B → 中文描述 ≤100 字
-         │    ├─ 关键词匹配分类体系
+         ├─ status → "processing"
+         │
+         ├─ Step 1: VLM Caption + Classify
+         │    ├─ 调用 Ollama API: Qwen3-VL 8B → 中文描述 ≤100 字 + "分类：" 分隔
+         │    ├─ 模型自行选出 1-3 个最佳分类
          │    ├─ 保存 caption_ai + ImageCategory 关联
-         │    └─ 更新 ProcessingTask.status → "done"
+         │    └─ 失败自动重试一次
          │
-         └─ Step 2: _async_detect_faces
-              ├─ 更新 processing_status → "faces"
-              ├─ 创建 ProcessingTask (task_type="detect_faces", status="running")
-              ├─ InsightFace SCRFD 检测人脸
-              ├─ ArcFace 提取 512 维嵌入
-              ├─ pgvector 余弦相似度匹配已知人物（阈值 0.55）
-              │    ├─ 匹配成功 → 关联已有 Person
-              │    └─ 匹配失败 → 创建新 Person (is_verified=False)
-              ├─ 裁剪保存脸部缩略图
-              └─ 更新 processing_status → "done"
+         ├─ Step 2: Face Detection + Recognition
+         │    ├─ InsightFace SCRFD 检测人脸
+         │    ├─ ArcFace 提取 512 维嵌入
+         │    ├─ pgvector 余弦相似度匹配已知人物（阈值 0.55）
+         │    │    ├─ 匹配成功 → 关联已有 Person
+         │    │    └─ 匹配失败 → 创建新 Person (is_verified=False)
+         │    └─ 裁剪保存脸部缩略图
+         │
+         └─ status → "done" (或 "error" 异常时)
 ```
+
+> **架构说明 (Plan C)**: Celery worker 已被 Processing Service 取代（`docker-compose.yml` 中 worker 标记为 `profiles: [legacy]`）。
+> Processing Service 是独立的 FastAPI 应用（端口 8002），使用 `ThreadPoolExecutor(max_workers=1)` 串行执行 AI 任务，
+> 通过同步 psycopg2 连接直接操作数据库，避免了 Celery + Redis 的复杂性和事件循环问题。
 
 ### 4.2 关键技术问题与解决方案
 
@@ -240,6 +247,8 @@ POST /api/images/upload
 | **竖图缩略图旋转 90°** | Pillow `Image.open()` 不应用 EXIF 方向标签 | 使用 `ImageOps.exif_transpose()` 在缩略前校正方向 |
 | **`/images/recent` 被 `/{image_id}` 拦截** | FastAPI 路由注册顺序：参数化路由先于静态路由 | 将 `/recent` 路由注册移到 `/{image_id}` 之前 |
 | **GPU VRAM 管理** | 12GB 无法同时加载多个模型 | `concurrency=1` 串行执行，Ollama 独立容器按需加载 |
+| **Celery worker 退出不重来** | Celery + async SQLAlchemy 事件循环冲突，worker 僵死 | **Plan C**: Processing Service (FastAPI + ThreadPoolExecutor + sync psycopg2) 完全取代 Celery |
+| **处理状态不准确** | 状态在任务入队时即设为 "processing"，实际排队中 | 将状态更新移入 `_worker()` 内部，仅在线程启动后更新 |
 
 ### 4.3 配置项（.env / Settings）
 
@@ -380,9 +389,12 @@ image_db/
 | TODO-1 | 上传时可选择是否开启 AI 描述和人脸识别（开关控件） | ✅ 已完成 |
 | TODO-2 | 补充各功能模块的单元测试（可在本机 Docker 环境执行） | ✅ 已完成 |
 | TODO-3 | 人物界面拖动头像合并重复人物（同一人识别为多个 Person） | ✅ 已完成 |
-| TODO-4 | 图像数据可视化（类别统计、人物统计、热词、知识图谱等） | 📋 待实现 |
-| TODO-5 | Prometheus + Grafana 系统指标监控（应用/流水线/基础设施） | 📋 待实现 |
-| TODO-6 | 系统可靠性设计（健康检查/心跳/优雅降级/自动恢复/日志审计） | 📋 待实现 |
+| TODO-4 | 图片批量多选操作（批量删除、批量合并人物） | ✅ 已完成 |
+| TODO-5 | 图片浏览增强：左右切换、键盘导航、幻灯片播放（顺序/随机） | ✅ 已完成 |
+| TODO-6 | 图片全屏灯箱模式（半透明掩模 + 悬浮控制栏 + 鼠标跟随显示） | ✅ 已完成 |
+| TODO-7 | 图像数据可视化（类别统计、人物统计、热词、知识图谱等） | 📋 待实现 |
+| TODO-8 | Prometheus + Grafana 系统指标监控（应用/流水线/基础设施） | 📋 待实现 |
+| TODO-9 | 系统可靠性设计（健康检查/心跳/优雅降级/自动恢复/日志审计） | 📋 待实现 |
 
 ---
 
@@ -630,7 +642,7 @@ grafana:
 | **文档** | 新建 README.md（系统介绍、架构、启动方法、使用指南） | `README.md` |
 | **文档** | DEMO_V1 新增 TODO-4（图像数据可视化）+ 8.4 节 6 个子功能设计 | `docs/DEMO_V1.md` |
 
-### 2026-05-24（今日）
+### 2026-05-24
 
 | 类型 | 描述 | 涉及文件 |
 |------|------|---------|
@@ -638,3 +650,29 @@ grafana:
 | **工程** | `git init` → commit → push 至 GitHub | — |
 | **工程** | 文档目录标准化：`docs/` 文件夹集中管理迭代记录 | `docs/DEMO_V1.md` |
 | **文档** | DEMO_V1 补充：每日更新修复记录、搜索/分类/文件夹功能点更新、仓库信息 | `docs/DEMO_V1.md` |
+
+### 2026-05-25
+
+| 类型 | 描述 | 涉及文件 |
+|------|------|---------|
+| **架构升级** | **Plan C**: Processing Service (FastAPI port 8002) 取代 Celery worker，ThreadPoolExecutor 串行执行 AI 任务，同步 psycopg2 直连数据库 | `docker-compose.yml`、`backend/app/services/processing_server.py`、`backend/app/services/processing_pipeline.py` |
+| **Bug 修复** | 处理状态显示修复：状态仅在 worker 线程实际启动时变为 "processing"，之前入队即变 "processing" | `backend/app/services/processing_server.py` |
+| **工程** | Docker build pip 超时重试：`--default-timeout=300 --retries=5` + 清华镜像加速 | `backend/Dockerfile` |
+| **新功能** | BrowseState 跨页图片浏览：所有列表页 Link 传递 imageIds/currentIndex/returnUrl，ImageDetailPage 内 prev/next 导航 | `frontend/src/types/index.ts`、`frontend/src/pages/ImageDetailPage.tsx`、GalleryPage/SearchPage/DashboardPage/PersonDetailPage/AlbumDetailPage |
+| **新功能** | 键盘快捷键浏览：← → 上下张，Space 幻灯片播放，Esc/F 全屏切换 | `frontend/src/pages/ImageDetailPage.tsx` |
+| **新功能** | 幻灯片播放：顺序/随机模式切换，预设速度(3/5/10/15s) + 自定义秒数输入 | `frontend/src/pages/ImageDetailPage.tsx` |
+| **新功能** | 全屏灯箱模式：`fixed inset-0 z-50 bg-black/85 backdrop-blur-sm` 半透明掩模，图片悬浮居中，关闭按钮 + 序号指标 | `frontend/src/pages/ImageDetailPage.tsx` |
+| **新功能** | 全屏悬浮控制栏：`bg-black/50 backdrop-blur` 圆角条，鼠标移动 3s 自动隐藏，`stopPropagation` 防止误退出 | `frontend/src/pages/ImageDetailPage.tsx` |
+| **新功能** | TanStack Query prefetch 预加载相邻图片，浏览更流畅 | `frontend/src/pages/ImageDetailPage.tsx` |
+| **Bug 修复** | 人物拖拽合并失效：`<img>` 元素浏览器默认 drag 行为拦截父级 `dragstart`，添加 `draggable={false}` 修复 | `frontend/src/pages/PersonsPage.tsx` |
+
+### 2026-05-26
+
+| 类型 | 描述 | 涉及文件 |
+|------|------|---------|
+| **新功能** | 图片库多选模式：批量删除，选中计数，全选本页/取消全选，蓝色勾选复选框 + 蓝色高亮边框 | `frontend/src/pages/GalleryPage.tsx` |
+| **新功能** | 人物多选模式：悬浮弹窗（`bg-black/40 backdrop-blur-sm` 掩模），批量合并 + 批量删除，蓝色加粗边框标识选中 | `frontend/src/pages/PersonsPage.tsx` |
+| **新功能** | 批量合并：选中 ≥2 个人物，第一个为目标，其余合并进去；合并/删除后不自动退出，用户手动关闭弹窗 | `frontend/src/pages/PersonsPage.tsx` |
+| **Bug 修复** | 删除/合并人物时清理 `face_thumbnails/` 磁盘文件（之前仅删数据库记录，文件残留） | `backend/app/api/persons.py` |
+| **改进** | 多选弹窗仅显示"已识别人物"，不显示"待标注"；背景页面冻结不联动 | `frontend/src/pages/PersonsPage.tsx` |
+| **改进** | 多选样式：去除头像上圆形复选框，改为卡片直接显示 `ring-2 ring-blue-500` 蓝色加粗边框 | `frontend/src/pages/PersonsPage.tsx` |

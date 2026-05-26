@@ -1,0 +1,170 @@
+{
+  "title": "ImageDB Overview",
+  "uid": "imagedb-overview",
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "title": "HTTP Throughput (req/s)",
+      "type": "timeseries", "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "rate(imagedb_http_requests_total[1m])", "legendFormat": "{{method}} {{endpoint}}" }
+      ]
+    },
+    {
+      "id": 2, "title": "HTTP Latency (P50/P90/P99)",
+      "type": "timeseries", "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(imagedb_http_request_duration_seconds_bucket[1m]))", "legendFormat": "P50" },
+        { "expr": "histogram_quantile(0.90, rate(imagedb_http_request_duration_seconds_bucket[1m]))", "legendFormat": "P90" },
+        { "expr": "histogram_quantile(0.99, rate(imagedb_http_request_duration_seconds_bucket[1m]))", "legendFormat": "P99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 3, "title": "HTTP Status Codes",
+      "type": "timeseries", "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum(rate(imagedb_http_requests_total{status=~\"2..\"}[1m]))", "legendFormat": "2xx" },
+        { "expr": "sum(rate(imagedb_http_requests_total{status=~\"4..\"}[1m]))", "legendFormat": "4xx" },
+        { "expr": "sum(rate(imagedb_http_requests_total{status=~\"5..\"}[1m]))", "legendFormat": "5xx" }
+      ]
+    },
+    {
+      "id": 4, "title": "Inflight Requests",
+      "type": "stat", "gridPos": { "x": 0, "y": 6, "w": 4, "h": 4 },
+      "targets": [{ "expr": "imagedb_http_requests_inflight" }]
+    },
+    {
+      "id": 5, "title": "Total Requests (rate 5m avg)",
+      "type": "stat", "gridPos": { "x": 4, "y": 6, "w": 4, "h": 4 },
+      "targets": [{ "expr": "round(sum(rate(imagedb_http_requests_total[5m])), 0.01)" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 6, "title": "API Process Memory (MB)",
+      "type": "timeseries", "gridPos": { "x": 8, "y": 6, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "process_resident_memory_bytes / 1024 / 1024", "legendFormat": "RSS" },
+        { "expr": "process_virtual_memory_bytes / 1024 / 1024", "legendFormat": "VMS" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "MB" } }
+    },
+    {
+      "id": 7, "title": "API CPU (%)",
+      "type": "timeseries", "gridPos": { "x": 16, "y": 6, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "rate(process_cpu_seconds_total[1m]) * 100", "legendFormat": "CPU" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0 } }
+    },
+
+    {
+      "id": 10, "title": "DB Pool Usage",
+      "type": "timeseries", "gridPos": { "x": 0, "y": 10, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "imagedb_db_pool_size", "legendFormat": "Total" },
+        { "expr": "imagedb_db_pool_available", "legendFormat": "Available" }
+      ]
+    },
+    {
+      "id": 11, "title": "Component Health",
+      "type": "stat", "gridPos": { "x": 6, "y": 10, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "imagedb_health", "legendFormat": "{{component}}" }
+      ],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "red" }, { "value": 1, "color": "green" }] }, "max": 1, "min": 0 } }
+    },
+    {
+      "id": 12, "title": "HTTP Requests / sec (by endpoint)",
+      "type": "timeseries", "gridPos": { "x": 12, "y": 10, "w": 12, "h": 4 },
+      "targets": [
+        { "expr": "sum(rate(imagedb_http_requests_total[1m])) by (endpoint)", "legendFormat": "{{endpoint}}" }
+      ]
+    },
+
+    {
+      "id": 20, "title": "AI Pipeline Throughput (per min)",
+      "type": "timeseries", "gridPos": { "x": 0, "y": 14, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "rate(imagedb_processing_total{status=\"success\"}[1m])", "legendFormat": "{{stage}}" }
+      ]
+    },
+    {
+      "id": 21, "title": "AI Pipeline Duration (P50/P90)",
+      "type": "timeseries", "gridPos": { "x": 8, "y": 14, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(imagedb_processing_duration_seconds_bucket[5m]))", "legendFormat": "{{stage}} P50" },
+        { "expr": "histogram_quantile(0.90, rate(imagedb_processing_duration_seconds_bucket[5m]))", "legendFormat": "{{stage}} P90" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 22, "title": "Processing Status Breakdown",
+      "type": "timeseries", "gridPos": { "x": 16, "y": 14, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "rate(imagedb_processing_total[1m])", "legendFormat": "{{stage}} {{status}}" }
+      ]
+    },
+
+    {
+      "id": 30, "title": "Queue Delay (P50/P90/P99)",
+      "type": "timeseries", "gridPos": { "x": 0, "y": 20, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(imagedb_processing_queue_delay_seconds_bucket[5m]))", "legendFormat": "P50" },
+        { "expr": "histogram_quantile(0.90, rate(imagedb_processing_queue_delay_seconds_bucket[5m]))", "legendFormat": "P90" },
+        { "expr": "histogram_quantile(0.99, rate(imagedb_processing_queue_delay_seconds_bucket[5m]))", "legendFormat": "P99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 31, "title": "VLM Call Outcomes",
+      "type": "timeseries", "gridPos": { "x": 8, "y": 20, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "rate(imagedb_vlm_calls_total[5m])", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 32, "title": "Faces Detected / Image (avg)",
+      "type": "stat", "gridPos": { "x": 16, "y": 20, "w": 4, "h": 3 },
+      "targets": [
+        { "expr": "rate(imagedb_faces_detected_total_sum[5m]) / rate(imagedb_faces_detected_total_count[5m])" }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 1 } }
+    },
+    {
+      "id": 33, "title": "Redis Queue Length",
+      "type": "stat", "gridPos": { "x": 20, "y": 20, "w": 4, "h": 3 },
+      "targets": [
+        { "expr": "imagedb_redis_queue_length" }
+      ],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 5, "color": "orange" }, { "value": 20, "color": "red" }] } } }
+    },
+
+    {
+      "id": 40, "title": "GPU Utilization (%)",
+      "type": "timeseries", "gridPos": { "x": 0, "y": 26, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "imagedb_gpu_utilization_pct", "legendFormat": "{{device}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } }
+    },
+    {
+      "id": 41, "title": "GPU Memory Used",
+      "type": "timeseries", "gridPos": { "x": 8, "y": 26, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "imagedb_gpu_memory_used_bytes / 1024 / 1024 / 1024", "legendFormat": "{{device}} Used" },
+        { "expr": "imagedb_gpu_memory_total_bytes / 1024 / 1024 / 1024", "legendFormat": "{{device}} Total" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "GB" } }
+    },
+    {
+      "id": 42, "title": "GPU Temperature (°C)",
+      "type": "timeseries", "gridPos": { "x": 16, "y": 26, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "imagedb_gpu_temperature_celsius", "legendFormat": "{{device}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "celsius" } }
+    }
+  ]
+}

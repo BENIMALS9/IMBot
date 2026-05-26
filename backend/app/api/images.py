@@ -179,10 +179,20 @@ async def upload_images(
                 db.add(AlbumImage(album_id=album.id, image_id=img.id))
             await db.commit()
 
-    # Enqueue AI processing
-    from app.tasks.processing import process_new_image
+    # Submit to Processing Service
+    import httpx
+    processing_url = "http://processing:8002/process"
     for img in uploaded:
-        process_new_image.delay(str(img.id), enable_caption=enable_ai_caption, enable_faces=enable_face_recognition)
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(processing_url, json={
+                    "image_id": str(img.id),
+                    "enable_caption": enable_ai_caption,
+                    "enable_faces": enable_face_recognition,
+                })
+        except Exception:
+            # Processing service unavailable — will be retried by background task
+            pass
 
     return {"uploaded": len(uploaded), "image_ids": [str(img.id) for img in uploaded]}
 

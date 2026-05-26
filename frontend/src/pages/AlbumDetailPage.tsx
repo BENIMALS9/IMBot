@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useLocation } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { albumsApi, imagesApi } from "@/lib/api";
 import { ArrowLeft, Plus, X, Check, Pencil, Trash2 } from "lucide-react";
-import type { ImageItem } from "@/types";
+import type { ImageItem, BrowseState } from "@/types";
 
 export function AlbumDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -164,9 +165,17 @@ export function AlbumDetailPage() {
       ) : (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-            {images.map((img: ImageItem) => (
+            {images.map((img: ImageItem, idx: number) => (
               <div key={img.id} className="group relative">
-                <Link to={`/images/${img.id}`}>
+                <Link
+                  to={`/images/${img.id}`}
+                  state={{
+                    imageIds: images.map((i) => i.id),
+                    currentIndex: idx,
+                    contextTitle: album?.name ?? "相册",
+                    returnUrl: location.pathname + location.search,
+                  } satisfies BrowseState}
+                >
                   <div className="aspect-square rounded-lg overflow-hidden bg-gray-100">
                     <img
                       src={imagesApi.thumbnailUrl(img.id)}

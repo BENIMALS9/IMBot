@@ -1,11 +1,13 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy import create_engine
 
 from app.core.config import get_settings
 
 settings = get_settings()
 
+# Async engine (for FastAPI web layer)
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
@@ -14,6 +16,17 @@ engine = create_async_engine(
     pool_recycle=3600,
 )
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+# Sync engine (for Processing Service workers)
+_sync_url = settings.database_url.replace("+asyncpg", "")
+sync_engine = create_engine(
+    _sync_url,
+    echo=settings.debug,
+    pool_size=5,
+    max_overflow=10,
+    pool_recycle=3600,
+)
+SyncSession = sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
 class Base(DeclarativeBase):

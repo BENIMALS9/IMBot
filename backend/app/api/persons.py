@@ -52,6 +52,12 @@ async def delete_person(
     for ip in result.scalars():
         await db.delete(ip)
 
+    # Delete face thumbnail file from disk
+    if person.face_thumbnail:
+        import os as _os
+        if _os.path.exists(person.face_thumbnail):
+            _os.remove(person.face_thumbnail)
+
     await db.delete(person)
     await db.commit()
     return {"message": "deleted"}
@@ -85,6 +91,11 @@ async def update_person(
             for ip in result.scalars():
                 ip.person_id = person.id
             person.image_count += merge_from.image_count
+            # Delete face thumbnail file of merged person
+            if merge_from.face_thumbnail:
+                import os
+                if os.path.exists(merge_from.face_thumbnail):
+                    os.remove(merge_from.face_thumbnail)
             await db.delete(merge_from)
 
     await db.commit()

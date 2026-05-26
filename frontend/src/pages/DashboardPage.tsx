@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { imagesApi, adminApi, foldersApi, personsApi } from "@/lib/api";
 import { Image, FolderOpen, User, HardDrive } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
+import type { BrowseState } from "@/types";
 
 export function DashboardPage() {
+  const location = useLocation();
   const { data: images } = useQuery({
     queryKey: ["images", { page: 1, page_size: 12 }],
     queryFn: () => imagesApi.list({ page: 1, page_size: 12 }),
@@ -53,8 +55,18 @@ export function DashboardPage() {
       <div>
         <h2 className="text-lg font-semibold text-gray-700 mb-3">最近上传</h2>
         <div className="grid grid-cols-6 gap-3">
-          {images?.data?.items?.map((img: any) => (
-            <Link key={img.id} to={`/images/${img.id}`} className="group">
+          {images?.data?.items?.map((img: any, idx: number) => (
+            <Link
+              key={img.id}
+              to={`/images/${img.id}`}
+              state={{
+                imageIds: (images?.data?.items ?? []).map((i: any) => i.id),
+                currentIndex: idx,
+                contextTitle: "仪表盘",
+                returnUrl: "/",
+              } satisfies BrowseState}
+              className="group"
+            >
               <div className="aspect-square rounded-lg overflow-hidden bg-gray-100">
                 <img
                   src={imagesApi.thumbnailUrl(img.id)}

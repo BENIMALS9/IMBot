@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useLocation } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { personsApi, imagesApi } from "@/lib/api";
 import { ArrowLeft, Pencil, Trash2 } from "lucide-react";
-import type { ImageItem } from "@/types";
+import type { ImageItem, BrowseState } from "@/types";
 
 export function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
 
@@ -70,9 +71,17 @@ export function PersonDetailPage() {
       ) : (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-            {images.map((img) => (
+            {images.map((img, idx: number) => (
               <div key={img.id} className="group relative">
-                <Link to={`/images/${img.id}`}>
+                <Link
+                  to={`/images/${img.id}`}
+                  state={{
+                    imageIds: images.map((i) => i.id),
+                    currentIndex: idx,
+                    contextTitle: person?.name ?? "人物",
+                    returnUrl: location.pathname + location.search,
+                  } satisfies BrowseState}
+                >
                   <div className="aspect-square rounded-lg overflow-hidden bg-gray-100">
                     <img
                       src={imagesApi.thumbnailUrl(img.id)}

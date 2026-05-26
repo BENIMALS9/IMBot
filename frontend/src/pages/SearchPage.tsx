@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { searchApi, imagesApi } from "@/lib/api";
 import { Search, ChevronDown } from "lucide-react";
-import type { ImageItem } from "@/types";
+import type { ImageItem, BrowseState } from "@/types";
 
 const TYPE_COLORS: Record<string, string> = {
   "分类": "bg-blue-50 text-blue-600 border border-blue-200",
@@ -34,6 +34,7 @@ const SCOPE_OPTIONS = [
 type Suggestion = { label: string; type: string };
 
 export function SearchPage() {
+  const location = useLocation();
   const [query, setQuery] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [scope, setScope] = useState("all");
@@ -229,8 +230,18 @@ export function SearchPage() {
             <p className="text-gray-400 text-center py-12">未找到匹配的图片</p>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-              {(data.data.items ?? []).map((img: ImageItem) => (
-                <Link key={img.id} to={`/images/${img.id}`} className="group">
+              {(data.data.items ?? []).map((img: ImageItem, idx: number) => (
+                <Link
+                  key={img.id}
+                  to={`/images/${img.id}`}
+                  state={{
+                    imageIds: (data.data.items ?? []).map((i) => i.id),
+                    currentIndex: idx,
+                    contextTitle: `搜索: ${searchTerm}`,
+                    returnUrl: location.pathname + location.search,
+                  } satisfies BrowseState}
+                  className="group"
+                >
                   <div className="aspect-square rounded-lg overflow-hidden bg-gray-100">
                     <img
                       src={imagesApi.thumbnailUrl(img.id)}

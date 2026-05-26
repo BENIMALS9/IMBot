@@ -117,6 +117,13 @@ export interface PaginatedResponse<T> {
   page_size: number;
 }
 
+export interface BrowseState {
+  imageIds: string[];
+  currentIndex: number;
+  contextTitle: string;
+  returnUrl: string;
+}
+
 export interface SystemStatus {
   vlm_provider: string;
   enable_classification: boolean;

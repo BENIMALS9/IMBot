@@ -1,91 +1,58 @@
-"""AI processing tasks — async image processing pipeline.
+"""Sync AI processing pipeline — runs in Processing Service worker processes.
 
-Caption + face detection run concurrently via asyncio.gather within a task.
-Thread-local DB engines avoid asyncpg cross-thread conflicts with --pool=threads.
+Each worker process processes one image at a time, sequentially:
+1. caption + classification (VLM)
+2. face detection + recognition (InsightFace)
 
-Each step records its status in the ProcessingTask table for progress tracking.
+Uses sync DB (psycopg2) and sync VLM calls — no async, no greenlet, no issues.
 """
 
-import asyncio
 import os
-import threading
+import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
-from app.tasks.celery_app import celery_app
-
-
-# ---------------------------------------------------------------------------
-# Thread-local async DB sessions — each Celery thread gets its own engine
-# to avoid asyncpg "another operation is in progress" errors.
-# ---------------------------------------------------------------------------
-
-_thread_local = threading.local()
+from app.core.database import SyncSession
+from app.core.metrics import (
+    PROCESSING_DURATION, PROCESSING_QUEUE_DELAY, PROCESSING_TOTAL,
+    VLM_CALLS_TOTAL, FACES_DETECTED,
+)
 
 
-def _get_thread_session():
-    """Return an async session factory scoped to the current thread."""
-    if not hasattr(_thread_local, "session_factory"):
-        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-        from app.core.database import engine as _api_engine
-        # Clone engine config but create a per-thread instance
-        _thread_local.engine = create_async_engine(
-            _api_engine.url,
-            pool_size=3,
-            max_overflow=5,
-            pool_recycle=3600,
-            echo=False,
-        )
-        _thread_local.session_factory = async_sessionmaker(
-            _thread_local.engine, class_=AsyncSession, expire_on_commit=False
-        )
-    return _thread_local.session_factory()
+def process_image_sync(image_id: str, enable_caption: bool = True, enable_faces: bool = True):
+    """Run the full AI pipeline synchronously. Called from a worker process."""
+    _update_image_status_sync(image_id, "processing")
 
+    result = {"image_id": image_id, "caption": None, "faces": None}
 
-# ---------------------------------------------------------------------------
-# Orchestrator — runs both steps sequentially
-# ---------------------------------------------------------------------------
+    if enable_caption:
+        result["caption"] = _caption_and_classify_sync(image_id)
+    else:
+        result["caption"] = {"status": "skipped", "reason": "disabled by user"}
 
-@celery_app.task(name="process_new_image")
-def process_new_image(image_id: str, enable_caption: bool = True, enable_faces: bool = True):
-    """Run the full AI pipeline sequentially."""
-    result = _run_async(_async_pipeline(image_id, enable_caption, enable_faces))
+    if enable_faces:
+        result["faces"] = _detect_faces_sync(image_id)
+    else:
+        result["faces"] = {"status": "skipped", "reason": "disabled by user"}
+
+    _update_image_status_sync(image_id, "done")
     return result
 
 
-async def _async_pipeline(image_id: str, enable_caption: bool = True, enable_faces: bool = True):
-    """Run caption+classify and face detection concurrently via asyncio.gather.
-    Each step uses its own DB session, independent — no shared state."""
-
-    # Set unified "processing" status so frontend shows both tasks running
-    await _update_image_status(image_id, "processing")
-
-    skipped = {"status": "skipped", "reason": "disabled by user"}
-    caption_coro = _async_caption_and_classify(image_id) if enable_caption else skipped
-    faces_coro = _async_detect_faces(image_id) if enable_faces else skipped
-
-    caption_result, faces_result = await asyncio.gather(caption_coro, faces_coro, return_exceptions=True)
-    if isinstance(caption_result, BaseException):
-        caption_result = {"status": "error", "error": str(caption_result)}
-    if isinstance(faces_result, BaseException):
-        faces_result = {"status": "error", "error": str(faces_result)}
-
-    # Mark image as fully processed
-    await _update_image_status(image_id, "done")
-
-    return {
-        "image_id": image_id,
-        "caption": caption_result,
-        "faces": faces_result,
-    }
-
-
 # ---------------------------------------------------------------------------
-# ProcessingTask helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-async def _create_task(db, image_id: str, task_type: str):
+def _update_image_status_sync(image_id: str, status: str):
+    from app.models.image import Image
+    with SyncSession() as db:
+        img = db.get(Image, image_id)
+        if img:
+            img.processing_status = status
+            db.commit()
+
+
+def _create_task_sync(db, image_id: str, task_type: str):
     from app.models.processing_task import ProcessingTask
     task = ProcessingTask(
         image_id=image_id,
@@ -94,59 +61,45 @@ async def _create_task(db, image_id: str, task_type: str):
         started_at=datetime.now(timezone.utc),
     )
     db.add(task)
-    await db.flush()
+    db.flush()
     return task
 
 
-async def _finish_task(db, task, status: str = "done", result: dict | None = None, error: str | None = None):
+def _finish_task_sync(db, task, status: str = "done", result: dict | None = None, error: str | None = None):
     task.status = status
     task.completed_at = datetime.now(timezone.utc)
     if result:
         task.result = result
     if error:
         task.error_message = error
-    await db.flush()
-
-
-async def _update_image_status(image_id: str, status: str):
-    from app.models.image import Image
-    async with _get_thread_session() as db:
-        img = await db.get(Image, image_id)
-        if img:
-            img.processing_status = status
-            await db.commit()
+    db.flush()
 
 
 # ---------------------------------------------------------------------------
 # VLM caption + classification
 # ---------------------------------------------------------------------------
 
-async def _async_caption_and_classify(image_id: str):
+def _caption_and_classify_sync(image_id: str):
     from sqlalchemy import select
     from app.models.image import Image
     from app.models.category import Category, ImageCategory
-    from app.core.metrics import (
-        PROCESSING_DURATION, PROCESSING_QUEUE_DELAY, PROCESSING_TOTAL, VLM_CALLS_TOTAL,
-    )
 
     stage_start = time.perf_counter()
 
-    async with _get_thread_session() as db:
-        image = await db.get(Image, image_id)
+    with SyncSession() as db:
+        image = db.get(Image, image_id)
         if not image or not image.file_path or not os.path.exists(image.file_path):
             return {"status": "error", "error": "Image not found"}
 
-        # Record queue delay (image creation → processing start)
         if image.created_at:
             now_utc = datetime.now(timezone.utc)
             queue_delay = (now_utc - image.created_at.replace(tzinfo=timezone.utc)).total_seconds()
             PROCESSING_QUEUE_DELAY.observe(max(queue_delay, 0))
 
-        # Record task
-        task = await _create_task(db, image_id, "caption_and_classify")
-        await db.commit()
+        task = _create_task_sync(db, image_id, "caption_and_classify")
+        db.commit()
 
-        result = await db.execute(
+        result = db.execute(
             select(Category).where(Category.user_id == image.user_id)
         )
         categories = result.scalars().all()
@@ -154,13 +107,12 @@ async def _async_caption_and_classify(image_id: str):
         from app.services.vlm_provider import get_vlm_provider
         provider = get_vlm_provider()
         if not provider:
-            await _finish_task(db, task, "done", {"reason": "no vlm provider"})
-            await db.commit()
+            _finish_task_sync(db, task, "done", {"reason": "no vlm provider"})
+            db.commit()
             return {"status": "skipped", "reason": "no vlm provider"}
 
         slug_to_cat = {cat.slug: cat for cat in categories} if categories else {}
 
-        # Build prompt: caption + category names listed for the model to pick from
         if categories:
             cat_names = "、".join(cat.name for cat in categories)
             prompt = (
@@ -174,7 +126,7 @@ async def _async_caption_and_classify(image_id: str):
         matched_slugs = []
 
         try:
-            response = await provider.describe_image(image.file_path, prompt)
+            response = provider.describe_image_sync(image.file_path, prompt)
             raw = response.caption.strip()
         except Exception as e:
             import httpx
@@ -183,38 +135,32 @@ async def _async_caption_and_classify(image_id: str):
             status = "timeout" if is_timeout else "error"
             VLM_CALLS_TOTAL.labels(status=status).inc()
             PROCESSING_TOTAL.labels(stage="caption", status=status).inc()
-            await _finish_task(db, task, status, error=error_msg)
-            await db.commit()
+            _finish_task_sync(db, task, status, error=error_msg)
+            db.commit()
             return {"status": status, "error": error_msg}
 
-        # Retry once if empty
         if not raw:
             try:
-                response = await provider.describe_image(image.file_path, "请用中文描述这张图片的内容，不超过100字。")
+                response = provider.describe_image_sync(image.file_path, "请用中文描述这张图片的内容，不超过100字。")
                 raw = response.caption.strip()
             except Exception:
                 raw = ""
 
-        # Track VLM call outcome
         if raw:
             VLM_CALLS_TOTAL.labels(status="success").inc()
         else:
             VLM_CALLS_TOTAL.labels(status="empty").inc()
 
-        # Parse: split on "分类：" or "类别：" or "categories:" to separate caption from categories
-        import re
         parts = re.split(r"分类[：:]|类别[：:]|[Cc]ategor", raw, maxsplit=1)
         caption = parts[0].strip().rstrip("，。,.")
         cat_text = parts[1].strip() if len(parts) > 1 else ""
 
         if cat_text and categories:
-            # Clean up the classification text, then match category names
             cat_text = re.sub(r"[\d]+[.、]|相关分类[：:]|\n", "", cat_text)
             for cat in categories:
                 if cat.name in cat_text:
                     matched_slugs.append(cat.slug)
 
-        # Fallback: if no categories found via parsing, search for cat names in full response
         if not matched_slugs and categories:
             for cat in categories:
                 if cat.name in raw:
@@ -225,7 +171,7 @@ async def _async_caption_and_classify(image_id: str):
         for slug in matched_slugs:
             cat = slug_to_cat.get(slug)
             if cat:
-                exists = await db.scalar(
+                exists = db.scalar(
                     select(ImageCategory.id).where(
                         ImageCategory.image_id == image.id,
                         ImageCategory.category_id == cat.id,
@@ -240,13 +186,12 @@ async def _async_caption_and_classify(image_id: str):
                     ))
 
         matched_names = [slug_to_cat[s].name for s in matched_slugs if s in slug_to_cat]
-        await _finish_task(db, task, "done", {
+        _finish_task_sync(db, task, "done", {
             "caption": caption if caption else raw,
             "categories": matched_names,
         })
-        await db.commit()
+        db.commit()
 
-        # Record metrics
         elapsed = time.perf_counter() - stage_start
         PROCESSING_DURATION.labels(stage="caption").observe(elapsed)
         PROCESSING_TOTAL.labels(stage="caption", status="success").inc()
@@ -282,16 +227,15 @@ def _get_face_app():
     return _face_app
 
 
-async def _async_detect_faces(image_id: str):
+def _detect_faces_sync(image_id: str):
     from sqlalchemy import select, func
     from app.models.image import Image
     from app.models.person import Person, ImagePerson
-    from app.core.metrics import PROCESSING_DURATION, PROCESSING_TOTAL, FACES_DETECTED
 
     stage_start = time.perf_counter()
 
-    async with _get_thread_session() as db:
-        image = await db.get(Image, image_id)
+    with SyncSession() as db:
+        image = db.get(Image, image_id)
         if not image or not image.file_path or not os.path.exists(image.file_path):
             return {"status": "error", "error": "Image not found"}
 
@@ -299,9 +243,8 @@ async def _async_detect_faces(image_id: str):
         if not get_settings().enable_face_recognition:
             return {"status": "skipped", "reason": "disabled"}
 
-        # Record task
-        task = await _create_task(db, image_id, "detect_faces")
-        await db.commit()
+        task = _create_task_sync(db, image_id, "detect_faces")
+        db.commit()
 
         try:
             app = _get_face_app()
@@ -309,26 +252,25 @@ async def _async_detect_faces(image_id: str):
             faces = app.get(img_bgr)
         except Exception as e:
             PROCESSING_TOTAL.labels(stage="faces", status="error").inc()
-            await _finish_task(db, task, "error", error=str(e))
-            await db.commit()
+            _finish_task_sync(db, task, "error", error=str(e))
+            db.commit()
             return {"status": "error", "error": f"Detection failed: {e}"}
 
         if not faces:
             FACES_DETECTED.observe(0)
+            _finish_task_sync(db, task, "done", {"faces_found": 0})
+            db.commit()
             elapsed = time.perf_counter() - stage_start
             PROCESSING_DURATION.labels(stage="faces").observe(elapsed)
             PROCESSING_TOTAL.labels(stage="faces", status="success").inc()
-            await _finish_task(db, task, "done", {"faces_found": 0})
-            await db.commit()
             return {"status": "done", "faces_found": 0}
 
-        existing_persons = await db.execute(
+        existing_persons = db.execute(
             select(Person).where(
                 Person.user_id == image.user_id,
                 Person.face_embedding.isnot(None),
             )
-        )
-        person_list = existing_persons.scalars().all()
+        ).scalars().all()
 
         results = []
         for face in faces:
@@ -345,7 +287,7 @@ async def _async_detect_faces(image_id: str):
             matched_person = None
             best_similarity: float = 0.55
 
-            for person in person_list:
+            for person in existing_persons:
                 sim = _cosine_similarity(embedding, person.face_embedding)
                 if sim > best_similarity:
                     best_similarity = float(sim)
@@ -362,10 +304,9 @@ async def _async_detect_faces(image_id: str):
                     face_embedding=embedding,
                 )
                 db.add(person)
-                await db.flush()
+                db.flush()
 
-            # Skip if this image-person association already exists (re-processing guard)
-            existing_ip = await db.scalar(
+            existing_ip = db.scalar(
                 select(ImagePerson.id).where(
                     ImagePerson.image_id == image.id,
                     ImagePerson.person_id == person.id,
@@ -389,7 +330,7 @@ async def _async_detect_faces(image_id: str):
                 confidence=round(best_similarity, 4),
             ))
 
-            count = await db.scalar(
+            count = db.scalar(
                 select(func.count(ImagePerson.id)).where(
                     ImagePerson.person_id == person.id
                 )
@@ -409,11 +350,11 @@ async def _async_detect_faces(image_id: str):
                 "is_new": matched_person is None,
             })
 
-        await _finish_task(db, task, "done", {
+        _finish_task_sync(db, task, "done", {
             "faces_found": len(results),
             "faces": results,
         })
-        await db.commit()
+        db.commit()
 
         FACES_DETECTED.observe(len(results))
         elapsed = time.perf_counter() - stage_start
@@ -428,19 +369,8 @@ async def _async_detect_faces(image_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Shared helpers (same logic as async version)
 # ---------------------------------------------------------------------------
-
-def _run_async(coro):
-    """Run an async coroutine in a new event loop for this thread.
-
-    With threads pool, each thread needs its own event loop. Threads share
-    the same process space so no engine.dispose() is needed (that was a
-    workaround for prefork's parent-process connection problem).
-    """
-    import asyncio
-    return asyncio.run(coro)
-
 
 def _load_image_bgr(filepath: str):
     import cv2

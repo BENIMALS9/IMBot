@@ -22,20 +22,22 @@ class VLMProvider(ABC):
     async def describe_image(self, image_path: str, prompt: str | None = None) -> VLMResponse:
         ...
 
+    def describe_image_sync(self, image_path: str, prompt: str | None = None) -> VLMResponse:
+        """Sync wrapper — subclasses should override for true sync implementation."""
+        import asyncio
+        return asyncio.run(self.describe_image(image_path, prompt))
+
 
 class OllamaProvider(VLMProvider):
     def __init__(self, base_url: str, model: str):
         self.base_url = base_url
         self.model = model
 
-    async def describe_image(self, image_path: str, prompt: str | None = None) -> VLMResponse:
+    def _build_messages(self, image_path: str, prompt: str | None = None):
         import base64
-        import httpx
-
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
-
-        messages = [{
+        return [{
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
@@ -43,8 +45,32 @@ class OllamaProvider(VLMProvider):
             ],
         }]
 
+    async def describe_image(self, image_path: str, prompt: str | None = None) -> VLMResponse:
+        import httpx
+        messages = self._build_messages(image_path, prompt)
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
+                f"{self.base_url}/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": 500,
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                },
+            )
+            data = resp.json()
+            return VLMResponse(
+                caption=data["choices"][0]["message"]["content"],
+                model_used=self.model,
+                provider="ollama",
+            )
+
+    def describe_image_sync(self, image_path: str, prompt: str | None = None) -> VLMResponse:
+        import httpx
+        messages = self._build_messages(image_path, prompt)
+        with httpx.Client(timeout=120) as client:
+            resp = client.post(
                 f"{self.base_url}/chat/completions",
                 json={
                     "model": self.model,
